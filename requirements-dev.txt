@@ -1,0 +1,6 @@
+# Requirements for development and testing
+
+openai>=1.0.0
+pytest>=6.0.0
+black>=22.0.0
+flake8>=4.0.0
