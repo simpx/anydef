@@ -2,28 +2,21 @@
 
 ## Project Overview
 
-AnyDef is a Python library that uses AI to auto-generate function implementations based on their signatures and docstrings. The core idea is simple: write a function signature with a docstring, and let AI generate the actual implementation at runtime.
+AnyDef is a Python library that uses AI to auto-generate function implementations based on their signatures and docstrings. Generated code executes safely in an isolated PyodideSandbox environment (WebAssembly-based).
 
 ## Project Structure
 
 ```
 anydef/
 ├── anydef/                 # Main package
-│   ├── __init__.py         # Package exports
+│   ├── __init__.py         # Package exports (anydef, anydef_async)
 │   ├── core.py             # Core decorator implementation
 │   ├── version.py          # Version information
 │   └── __main__.py         # CLI entry point
 ├── tests/                  # Test suite
-│   └── test_anydef.py      # Unit tests
+│   └── test_anydef.py      # Unit tests (sync & async)
 ├── examples/               # Usage examples
-│   ├── basic_fibonacci.py
-│   ├── math_functions.py
-│   ├── string_processing.py
-│   └── advanced_model_selection.py
 ├── docs/                   # Documentation
-│   ├── api_reference.md
-│   ├── contributing.md
-│   └── core_concepts.md
 ├── setup.py                # Package setup
 ├── pyproject.toml          # Project configuration
 ├── requirements.txt        # Production dependencies
@@ -32,7 +25,19 @@ anydef/
 
 ## Quick Start
 
-### 1. Clone and Setup
+### 1. Install Prerequisites
+
+**Deno** is required for the sandbox:
+
+```bash
+# macOS
+brew install deno
+
+# Linux
+curl -fsSL https://deno.land/install.sh | sh
+```
+
+### 2. Clone and Setup
 
 ```bash
 git clone https://github.com/yourusername/anydef.git
@@ -47,67 +52,70 @@ pip install -e .
 pip install -r requirements-dev.txt
 ```
 
-### 2. Configure API Key
+### 3. Configure API Key
 
 ```bash
 export OPENAI_API_KEY=your_api_key_here
 ```
 
-### 3. Run Tests
+### 4. Run Tests
 
 ```bash
-pytest tests/
+pytest tests/ -v
 ```
 
 ## Core Architecture
 
-### The `@anydef` Decorator
+### Flow Diagram
 
-The decorator in `anydef/core.py` works as follows:
-
-1. **Function Introspection**: Extracts function name, signature, and docstring
-2. **Prompt Generation**: Builds a prompt for the AI model
-3. **API Call**: Sends the prompt to OpenAI's API
-4. **Code Execution**: Executes the generated code in a sandboxed environment
-5. **Result Return**: Returns the function result
+```
+┌──────────────┐    ┌──────────────┐    ┌─────────────────┐    ┌────────┐
+│  @anydef     │───▶│  OpenAI API  │───▶│ PyodideSandbox  │───▶│ Result │
+│  decorator   │    │  (generate)  │    │ (WASM execute)  │    │        │
+└──────────────┘    └──────────────┘    └─────────────────┘    └────────┘
+```
 
 ### Key Components
 
+1. **`_generate_code()`**: Calls OpenAI API to generate function implementation
+2. **`_execute_in_sandbox()`**: Runs code in PyodideSandbox (async)
+3. **`anydef`**: Sync decorator (uses `asyncio.run()` internally)
+4. **`anydef_async`**: Async decorator for native async usage
+
+### Decorator Parameters
+
 ```python
-# Decorator usage patterns
-@anydef                           # Default model (gpt-3.5-turbo)
-@anydef()                         # Same as above
-@anydef(model="gpt-4")            # Custom model
+@anydef(
+    model="gpt-3.5-turbo",  # OpenAI model
+    timeout=30,              # Sandbox timeout (seconds)
+    debug=False              # Print generated code
+)
 ```
 
-### Security: Safe Execution Environment
+### Security: PyodideSandbox
 
-The generated code runs in a restricted environment with limited built-ins:
-- Basic types: `int`, `float`, `str`, `bool`, `list`, `dict`, `set`, `tuple`
-- Iterators: `range`, `enumerate`, `zip`, `map`, `filter`, `reversed`
-- Math: `abs`, `pow`, `round`, `min`, `max`, `sum`, `divmod`
-- Utilities: `len`, `sorted`, `all`, `any`, `isinstance`, `type`
+Generated code runs in **PyodideSandbox** (LangChain), which provides:
+
+- **WebAssembly Isolation**: Python runs in Pyodide (WASM), completely isolated
+- **No Filesystem Access**: Cannot read/write host files
+- **No Network Access**: Disabled by default (`allow_net=False`)
+- **Timeout Protection**: Prevents infinite loops
+- **Powered by Deno**: Secure runtime with fine-grained permissions
 
 ## Development Workflow
 
 ### Code Style
 
-We use Black for formatting and Flake8 for linting:
-
 ```bash
-# Format code
+# Format
 black .
 
-# Check linting
+# Lint
 flake8
 
 # Both before commit
 black . && flake8
 ```
-
-Configuration in `pyproject.toml`:
-- Line length: 88
-- Target Python: 3.8+
 
 ### Running Tests
 
@@ -115,84 +123,119 @@ Configuration in `pyproject.toml`:
 # All tests
 pytest
 
-# Verbose output
+# Verbose
 pytest -v
 
-# Specific test
-pytest tests/test_anydef.py::test_fibonacci
+# Specific test class
+pytest tests/test_anydef.py::TestAnydefSync
 
-# With coverage
-pytest --cov=anydef
+# Async tests only
+pytest tests/test_anydef.py::TestAnydefAsync
+
+# With different model
+ANYDEF_TEST_MODEL=gpt-4 pytest
 ```
 
 ### Adding New Features
 
 1. Create a feature branch
-2. Write tests first (TDD recommended)
-3. Implement the feature in `anydef/core.py`
-4. Update `__init__.py` if adding new exports
-5. Add examples in `examples/`
-6. Update documentation
+2. Write tests first (TDD)
+3. Implement in `anydef/core.py`
+4. Update `__init__.py` exports if needed
+5. Update documentation
 
-## API Design Principles
+## Key Implementation Details
 
-1. **Simple by Default**: `@anydef` should work without configuration
-2. **Configurable When Needed**: Support model selection and other options
-3. **Fail Gracefully**: Clear error messages with guidance
-4. **Secure**: Sandboxed execution environment
+### Argument Serialization
 
-## Testing Guidelines
-
-### Test Structure
+Arguments are serialized to JSON to pass into the sandbox:
 
 ```python
-def test_feature_name():
-    """Describe what the test verifies."""
-    @anydef(model="your-model")
-    def function_to_test(param: Type) -> ReturnType:
-        """Clear docstring describing behavior."""
-        pass
+# In _execute_in_sandbox()
+execution_code = f'''
+{generated_code}
 
-    # Assertions
-    assert function_to_test(input) == expected_output
+import json
+_args = json.loads({repr(args)})
+_kwargs = json.loads({repr(kwargs)})
+_result = {func_name}(*_args, **_kwargs)
+print(json.dumps({{"__anydef_result__": _result}}))
+'''
 ```
 
-### Test Categories
+### Code Caching
 
-- **Unit Tests**: Test individual functions
-- **Integration Tests**: Test with actual API calls
-- **Error Handling Tests**: Test error scenarios
+Generated code is cached per function to avoid redundant API calls:
+
+```python
+_generated_code_cache: dict = {}
+
+if func.__name__ not in _generated_code_cache:
+    code = _generate_code(func, model)
+    _generated_code_cache[func.__name__] = code
+```
+
+### Async Context Handling
+
+The sync decorator handles both sync and async contexts:
+
+```python
+try:
+    loop = asyncio.get_running_loop()
+    # In async context: use ThreadPoolExecutor
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future = executor.submit(asyncio.run, coro)
+        return future.result()
+except RuntimeError:
+    # Not in async context: use asyncio.run directly
+    return asyncio.run(coro)
+```
+
+## Dependencies
+
+### Production
+- `openai>=1.0.0` - OpenAI API client
+- `langchain-sandbox>=0.0.6` - PyodideSandbox
+
+### Development
+- `pytest>=6.0.0` - Testing framework
+- `pytest-asyncio>=0.21.0` - Async test support
+- `black>=22.0.0` - Code formatter
+- `flake8>=4.0.0` - Linter
 
 ## Debugging
 
-### Enable Debug Output
-
-The decorator prints generated code by default. For more debugging:
+### Enable Debug Mode
 
 ```python
-import logging
-logging.basicConfig(level=logging.DEBUG)
+@anydef(debug=True)
+def my_function(...):
+    ...
 ```
 
 ### Common Issues
 
-1. **Model Not Found**: Check model name and API access
-2. **API Key Invalid**: Verify `OPENAI_API_KEY` environment variable
-3. **Generated Code Error**: Check docstring clarity
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| `Model not found` | Invalid model name | Check OpenAI docs for available models |
+| `Sandbox timeout` | Code takes too long | Increase `timeout` parameter |
+| `JSON decode error` | Non-serializable result | Ensure result is JSON-serializable |
+| `Deno not found` | Deno not installed | Install Deno runtime |
 
 ## Release Process
 
-1. Update version in `anydef/version.py` and `setup.py`
+1. Update version in `anydef/version.py`
 2. Update `CHANGELOG.md`
-3. Run full test suite
+3. Run full test suite: `pytest`
 4. Create git tag: `git tag v0.x.x`
 5. Build: `python -m build`
 6. Upload: `twine upload dist/*`
 
-## Future Roadmap
+## Roadmap
 
-- [ ] Caching generated implementations
-- [ ] Support for multiple AI providers (Anthropic, etc.)
-- [ ] Async function support
-- [ ] Type validation for generated code
-- [ ] Configuration file support
+- [x] PyodideSandbox integration
+- [x] Async support (`anydef_async`)
+- [x] Code caching
+- [ ] Multiple AI providers (Anthropic, etc.)
+- [ ] Persistent code cache (file-based)
+- [ ] Custom sandbox configurations

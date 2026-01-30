@@ -1,3 +1,4 @@
 # Requirements for runtime
 
 openai>=1.0.0
+langchain-sandbox>=0.0.6

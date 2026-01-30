@@ -4,76 +4,113 @@ This document provides guidance for Claude Code when assisting with the AnyDef p
 
 ## Project Context
 
-AnyDef is a Python library that uses AI to auto-generate function implementations. Users write function signatures with docstrings, and the `@anydef` decorator generates the implementation at runtime using OpenAI's API.
+AnyDef is a Python library that uses AI to auto-generate function implementations. Users write function signatures with docstrings, and the `@anydef` decorator generates the implementation at runtime using OpenAI's API. Generated code executes safely in **PyodideSandbox** (WebAssembly isolation).
 
 ### Core Usage Pattern
 
 ```python
-from anydef import anydef
+from anydef import anydef, anydef_async
 
+# Sync version
 @anydef
 def function_name(param: Type) -> ReturnType:
     """Docstring describing what the function should do."""
     pass
 
-# The function is now callable and will generate its implementation via AI
 result = function_name(arg)
+
+# Async version
+@anydef_async
+async def async_function(param: Type) -> ReturnType:
+    """Docstring describing behavior."""
+    pass
+
+result = await async_function(arg)
 ```
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
-| `anydef/core.py` | Main decorator implementation |
+| `anydef/core.py` | Main implementation: `anydef`, `anydef_async`, `_generate_code()`, `_execute_in_sandbox()` |
 | `anydef/__init__.py` | Package exports |
 | `anydef/version.py` | Version string |
-| `tests/test_anydef.py` | Test suite |
-| `examples/` | Usage examples |
+| `tests/test_anydef.py` | Test suite (sync & async) |
+| `requirements.txt` | Runtime deps: `openai`, `langchain-sandbox` |
+
+## Architecture
+
+```
+┌──────────────┐    ┌──────────────┐    ┌─────────────────┐    ┌────────┐
+│  @anydef     │───▶│  OpenAI API  │───▶│ PyodideSandbox  │───▶│ Result │
+│  decorator   │    │  (generate)  │    │ (WASM execute)  │    │        │
+└──────────────┘    └──────────────┘    └─────────────────┘    └────────┘
+```
+
+### Key Functions
+
+1. **`_generate_code(func, model)`**: Calls OpenAI to generate Python code
+2. **`_execute_in_sandbox(code, func_name, args, kwargs, timeout)`**: Runs code in PyodideSandbox
+3. **`anydef`**: Sync decorator, wraps async execution with `asyncio.run()`
+4. **`anydef_async`**: Native async decorator
 
 ## Code Conventions
 
 ### Style
-- Use Black formatter (line length 88)
-- Follow PEP 8
-- Type hints required for all public functions
-- Docstrings required for all public functions
+- Black formatter (line length 88)
+- PEP 8 compliance
+- Type hints required for public functions
+- Docstrings required for public functions
 
 ### Imports Order
-1. Standard library
-2. Third-party packages
+1. Standard library (`asyncio`, `functools`, `inspect`)
+2. Third-party (`openai`, `langchain_sandbox`)
 3. Local imports
-
-### Naming
-- Functions: `snake_case`
-- Classes: `PascalCase`
-- Constants: `UPPER_SNAKE_CASE`
-- Private: prefix with `_`
 
 ## Common Tasks
 
-### Adding a New Parameter to `@anydef`
+### Adding a New Decorator Parameter
 
-1. Update the `anydef()` function signature in `core.py`
-2. Handle both `@anydef` and `@anydef()` decorator patterns
-3. Add tests in `test_anydef.py`
-4. Add example in `examples/`
+1. Add parameter to both `anydef()` and `anydef_async()` signatures
+2. Pass through in the nested `decorator()` function
+3. Use in `_generate_code()` or `_execute_in_sandbox()` as needed
+4. Add tests
 5. Update README.md
+
+Example:
+```python
+def anydef(
+    func: Optional[Callable] = None,
+    model: str = DEFAULT_MODEL,
+    timeout: int = DEFAULT_TIMEOUT,
+    debug: bool = False,
+    new_param: str = "default",  # Add here
+) -> Callable:
+    if func is None:
+        def decorator(f):
+            return anydef(f, model=model, timeout=timeout, debug=debug, new_param=new_param)
+        return decorator
+    # ... use new_param
+```
 
 ### Adding a New AI Provider
 
-1. Create provider module: `anydef/providers/{provider}.py`
-2. Implement common interface
-3. Update `core.py` to support provider selection
-4. Add provider-specific error handling
+1. Create abstraction for code generation (e.g., `_generate_code_openai()`, `_generate_code_anthropic()`)
+2. Add `provider` parameter to decorators
+3. Update requirements.txt
+4. Add provider-specific tests
 
-### Modifying the Safe Execution Environment
+### Modifying Sandbox Behavior
 
-Location: `anydef/core.py`, `safe_builtins` dictionary
+Edit `_execute_in_sandbox()` in `core.py`:
 
-When adding built-ins, consider security implications. Only add functions that:
-- Cannot access the filesystem
-- Cannot make network requests
-- Cannot execute arbitrary code
+```python
+sandbox = PyodideSandbox(
+    allow_net=False,      # Network access
+    timeout=timeout,      # Execution timeout
+    # Add new options here
+)
+```
 
 ## Testing Requirements
 
@@ -81,78 +118,88 @@ When adding built-ins, consider security implications. Only add functions that:
 ```bash
 black .
 flake8
-pytest
+pytest -v
 ```
 
 ### Test Pattern
 ```python
-def test_feature():
-    @anydef(model="test-model")
-    def func(x: int) -> int:
-        """Clear docstring."""
-        pass
+class TestFeature:
+    def test_sync_version(self):
+        @anydef_decorator(model=TEST_MODEL)
+        def func(x: int) -> int:
+            """Clear docstring."""
+            pass
+        assert func(input) == expected
 
-    assert func(input) == expected
+    @pytest.mark.asyncio
+    async def test_async_version(self):
+        @anydef_async(model=TEST_MODEL)
+        async def func(x: int) -> int:
+            """Clear docstring."""
+            pass
+        assert await func(input) == expected
 ```
 
-### Tests Require
-- Real API key (set `OPENAI_API_KEY`)
-- Network access to OpenAI
+### Environment Variables
+- `OPENAI_API_KEY`: Required for tests
+- `ANYDEF_TEST_MODEL`: Override test model (default: gpt-3.5-turbo)
+
+## Sandbox Constraints
+
+Code running in PyodideSandbox has these limitations:
+
+1. **No filesystem access**: Cannot use `open()`, `os.path`, etc.
+2. **No network access**: Cannot use `requests`, `urllib`, etc. (unless `allow_net=True`)
+3. **Standard library only**: Most stdlib works, but no pip packages inside sandbox
+4. **JSON-serializable results**: Results pass through JSON, so only primitives/lists/dicts
+
+### What Works Inside Sandbox
+- All Python builtins
+- `math`, `itertools`, `functools`, `collections`
+- `json`, `re`, `datetime`
+- Basic algorithms and data processing
+
+### What Doesn't Work
+- `import requests`
+- `open('file.txt')`
+- `os.system()`
+- Custom pip packages
 
 ## Error Handling
 
-The project uses specific error handling:
-
 ```python
 try:
-    # API call
+    result = await sandbox.execute(code)
+    if result.status == "error":
+        raise RuntimeError(f"Sandbox error: {result.stderr}")
 except openai.APIStatusError as e:
     if e.status_code == 404:
-        # Model not found - provide helpful message
-    else:
-        # Other API errors
-except Exception as e:
-    # General errors
+        # Model not found
+    raise
 ```
-
-Always provide helpful error messages that guide users to solutions.
-
-## Security Considerations
-
-1. **Sandboxed Execution**: Generated code runs with limited built-ins
-2. **No File Access**: Generated code cannot read/write files
-3. **No Network Access**: Generated code cannot make network requests
-4. **Input Validation**: Validate all user inputs before processing
 
 ## Dependencies
 
-### Production
+### Runtime
 - `openai>=1.0.0`
+- `langchain-sandbox>=0.0.6`
 
-### Development
-- `pytest>=6.0.0`
-- `black>=22.0.0`
-- `flake8>=4.0.0`
+### System
+- **Deno runtime** (required for PyodideSandbox)
 
 ## When Making Changes
 
 1. Read existing code before modifying
-2. Maintain backward compatibility
-3. Keep the API simple
+2. Maintain backward compatibility for decorator API
+3. Keep both sync and async versions in parity
 4. Write tests for new functionality
 5. Update documentation if user-facing
-6. Run the full test suite before committing
+6. Run full test suite before committing
 
 ## Common Pitfalls
 
-- The decorator must handle both `@anydef` and `@anydef()` syntax
-- Generated code might vary between API calls - tests should be deterministic where possible
-- Model availability varies by API key - use configurable models in tests
-- The `exec()` call uses a restricted environment - don't assume all Python features work
-
-## Project Goals
-
-1. **Simplicity**: Minimal configuration required
-2. **Flexibility**: Support multiple models and providers
-3. **Security**: Safe execution of generated code
-4. **Developer Experience**: Clear errors and good documentation
+- Decorator must handle both `@anydef` and `@anydef()` syntax
+- Results must be JSON-serializable (no custom objects)
+- Async context detection is needed for sync decorator
+- Generated code cache is per-wrapper-instance, not global
+- Deno must be installed for sandbox to work
